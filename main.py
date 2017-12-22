@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 import argparse
-import pdb
+
+NUM_CLASSES = 10  # TODO: derive this from labels
 
 m_plus = 0.9
 m_min = 1.0 - m_plus
@@ -20,13 +21,18 @@ def batch_softmax(x):
 class CapsuleLoss(nn.Module):
     def __init__(self, gamma=0.5):
         super(CapsuleLoss, self).__init__()
+        self.reconstruction_loss = nn.MSELoss(size_average=False)  # Losses of a batch are summed
         self.gamma = gamma
 
-    def forward(self, vectors, labels):
+    def forward(self, vectors, labels, reconstructions, images):
         v_norm = vectors.norm(2, dim=2)
-        left = labels * F.relu(m_plus - v_norm) ** 2
-        right = self.gamma * (1 - labels) * F.relu(v_norm - m_min)
-        return torch.sum(left + right)
+        left = labels * F.relu(m_plus - v_norm, inplace=True) ** 2
+        right = self.gamma * (1 - labels) * F.relu(v_norm - m_min, inplace=True) ** 2
+        margin_loss = torch.sum(left + right)  # Losses of a batch are summed
+
+        reconstruction_loss = self.reconstruction_loss(reconstructions, images)
+
+        return margin_loss + 0.0005 * reconstruction_loss
 
 class CapsuleLayer(nn.Module):
     """Capsule layer of a Capsule net."""
@@ -34,6 +40,10 @@ class CapsuleLayer(nn.Module):
         super(CapsuleLayer, self).__init__()
         self.num_capsules = num_capsules
         self.num_route_nodes = num_route_nodes
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
 
         if num_route_nodes == -1:  # Capsule layer with convolutional units
             self.capsules = nn.ModuleList(
@@ -42,7 +52,7 @@ class CapsuleLayer(nn.Module):
         else:
             self.routing_weights = nn.Parameter(torch.randn(num_capsules, num_route_nodes, in_channels, out_channels))
 
-    # def forward(prediction_vectors, num_iterations, layer_idx):
+    def forward(self, x, num_iterations=None):
         """
         for all capsule i in layer l and capsule j in layer (l + 1): b_{ij} ← 0
         for r iterations do:
@@ -51,10 +61,8 @@ class CapsuleLayer(nn.Module):
           for all capsule j in layer (l + 1): v_j ← squash(s_j)
           for all capsule i in layer l and capsule j in layer (l + 1): b_{ij} ← b_{ij} + prediction_vector * v_j
         return v_j
-        """
-        # pass
 
-    def forward(self, x, num_iterations=None):
+        """
         if self.num_route_nodes == -1:
             outputs = [capsule(x).view(x.size(0), -1, 1) for capsule in self.capsules]
             outputs = torch.cat(outputs, dim=-1)
@@ -80,22 +88,34 @@ class CapsuleLayer(nn.Module):
 
 class CapsuleNet(nn.Module):
     """Capsule Net."""
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, reconstr_hidden1=512, reconstr_hidden2=1024):
         super(CapsuleNet, self).__init__()
 
         self.conv = nn.Conv2d(in_channels=1, out_channels=256, kernel_size=9, stride=1)
-        self.non_linearity = nn.ReLU()
+        self.non_linearity = nn.ReLU(inplace=True)
         self.primary_capsules = CapsuleLayer(num_capsules=8, num_route_nodes=-1, in_channels=256, out_channels=32, kernel_size=9, stride=2)
         self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * 6 * 6, in_channels=8, out_channels=16)
+
+        self.reconstruction = nn.Sequential(
+            nn.Linear(NUM_CLASSES * self.digit_capsules.out_channels, reconstr_hidden1),
+            nn.ReLU(inplace=True),
+            nn.Linear(reconstr_hidden1, reconstr_hidden2),
+            nn.ReLU(inplace=True),
+            nn.Linear(reconstr_hidden2, 28 * 28),  # TODO: use actual dimensions of input instead of hard-coded
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
         x = self.non_linearity(self.conv(x))
         x = self.primary_capsules(x)
         x = self.digit_capsules(x, num_iterations=3).squeeze().transpose(0, 1)
 
-        # classes = x.norm()
-        # classes = F.softmax(classes)
-        return x
+        classes = x.norm()
+        classes = F.softmax(classes)
+        masked = classes * x
+        reconstructed = self.reconstruction(masked.contiguous().view(masked.size(0), -1))
+
+        return x, reconstructed
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch_size", type=int, default=100, help="Batch size.")
@@ -104,6 +124,8 @@ parser.add_argument("--gpu", dest="cuda", default=torch.cuda.is_available(), act
 
 def main():
     from torchvision import datasets, transforms
+    from tensorboardX import SummaryWriter
+    writer = SummaryWriter()
     args = parser.parse_args()
     train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('../data', train=True,
@@ -115,25 +137,28 @@ def main():
         shuffle=True
     )
 
-    capsule_net = CapsuleNet(num_classes=10)
+    capsule_net = CapsuleNet(num_classes=NUM_CLASSES)
     capsule_loss = CapsuleLoss()
     optimizer = torch.optim.Adam(capsule_net.parameters())
 
+    train_steps = 0
     for epoch in range(args.num_epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             if args.cuda:
                 data, target = data.cuda(), target.cuda()
-            target = torch.sparse.torch.eye(10).index_select(dim=0, index=target)  # to one-hot vectors
+            target = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)  # to one-hot vectors
             data, target = Variable(data), Variable(target)
             capsule_net.zero_grad()
-            predictions = capsule_net(data)
-            loss = capsule_loss(predictions, target)
+            predictions, reconstructions = capsule_net(data)
+            loss = capsule_loss(predictions, target, reconstructions, data)
             loss.backward()
             optimizer.step()
             if batch_idx % 10 == 0:
+                writer.add_scalar('model/loss', loss.data[0], train_steps)
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.data[0]))
+            train_steps = train_steps + 1
 
 if __name__ == '__main__':
     main()
