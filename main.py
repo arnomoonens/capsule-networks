@@ -36,7 +36,7 @@ class CapsuleLoss(nn.Module):
 
 class CapsuleLayer(nn.Module):
     """Capsule layer of a Capsule net."""
-    def __init__(self, num_capsules, num_route_nodes, in_channels, out_channels, kernel_size=None, stride=None):
+    def __init__(self, num_capsules, num_route_nodes, in_channels, out_channels, kernel_size=None, stride=None, use_cuda=False):
         super(CapsuleLayer, self).__init__()
         self.num_capsules = num_capsules
         self.num_route_nodes = num_route_nodes
@@ -44,6 +44,7 @@ class CapsuleLayer(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.stride = stride
+        self.use_cuda = use_cuda
 
         if num_route_nodes == -1:  # Capsule layer with convolutional units
             self.capsules = nn.ModuleList(
@@ -70,6 +71,8 @@ class CapsuleLayer(nn.Module):
         else:
             prediction_vectors = x[None, :, :, None, :].matmul(self.routing_weights[:, None, :, :, :])
             logits = Variable(torch.zeros(*prediction_vectors.size()))
+            if self.use_cuda:
+                logits = logits.cuda()
 
             for _ in range(num_iterations):
                 coupling_coefficients = batch_softmax(logits)
@@ -88,13 +91,14 @@ class CapsuleLayer(nn.Module):
 
 class CapsuleNet(nn.Module):
     """Capsule Net."""
-    def __init__(self, num_classes, reconstr_hidden1=512, reconstr_hidden2=1024):
+    def __init__(self, num_classes, reconstr_hidden1=512, reconstr_hidden2=1024, use_cuda=False):
         super(CapsuleNet, self).__init__()
+        self.use_cuda = use_cuda
 
         self.conv = nn.Conv2d(in_channels=1, out_channels=256, kernel_size=9, stride=1)
         self.non_linearity = nn.ReLU(inplace=True)
-        self.primary_capsules = CapsuleLayer(num_capsules=8, num_route_nodes=-1, in_channels=256, out_channels=32, kernel_size=9, stride=2)
-        self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * 6 * 6, in_channels=8, out_channels=16)
+        self.primary_capsules = CapsuleLayer(num_capsules=8, num_route_nodes=-1, in_channels=256, out_channels=32, kernel_size=9, stride=2, use_cuda=use_cuda)
+        self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * 6 * 6, in_channels=8, out_channels=16, use_cuda=use_cuda)
 
         self.reconstruction = nn.Sequential(
             nn.Linear(NUM_CLASSES * self.digit_capsules.out_channels, reconstr_hidden1),
@@ -105,14 +109,24 @@ class CapsuleNet(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, x, labels=None):
         x = self.non_linearity(self.conv(x))
         x = self.primary_capsules(x)
         x = self.digit_capsules(x, num_iterations=3).squeeze().transpose(0, 1)
 
         classes = x.norm()
         classes = F.softmax(classes)
-        masked = classes * x
+
+        if labels is None:
+            # In all batches, get the most active capsule.
+            _, max_length_indices = classes.max(dim=1)
+            mask = Variable(torch.sparse.torch.eye(NUM_CLASSES))
+            if self.use_cuda:
+                mask = mask.cuda()
+            mask = mask.index_select(dim=0, index=max_length_indices.data)
+        else:  # During training, the capsules output is masked using correct labels
+            mask = labels
+        masked = mask[:, :, None] * x  # That None gives you an extra dimension, necessary for multiplication
         reconstructed = self.reconstruction(masked.contiguous().view(masked.size(0), -1))
 
         return x, reconstructed
@@ -128,7 +142,7 @@ def main():
     writer = SummaryWriter()
     args = parser.parse_args()
     train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('../data', train=True,
+        datasets.MNIST('./data', train=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))
@@ -138,18 +152,20 @@ def main():
     )
 
     capsule_net = CapsuleNet(num_classes=NUM_CLASSES)
+    if args.cuda:
+        capsule_net = capsule_net.cuda()
     capsule_loss = CapsuleLoss()
     optimizer = torch.optim.Adam(capsule_net.parameters())
 
     train_steps = 0
     for epoch in range(args.num_epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
+            target = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)  # to one-hot vectors
             if args.cuda:
                 data, target = data.cuda(), target.cuda()
-            target = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)  # to one-hot vectors
             data, target = Variable(data), Variable(target)
             capsule_net.zero_grad()
-            predictions, reconstructions = capsule_net(data)
+            predictions, reconstructions = capsule_net(data, target)
             loss = capsule_loss(predictions, target, reconstructions, data)
             loss.backward()
             optimizer.step()
