@@ -161,20 +161,23 @@ def main():
     train_steps = 0
     for epoch in range(args.num_epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
-            target = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)  # to one-hot vectors
+            target_onehot = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)
             if args.cuda:
-                data, target = data.cuda(), target.cuda()
-            data, target = Variable(data), Variable(target)
+                data, target_onehot = data.cuda(), target_onehot.cuda()
+            data, target_onehot = Variable(data), Variable(target_onehot)
             capsule_net.zero_grad()
-            predictions, reconstructions = capsule_net(data, target)
-            loss = capsule_loss(predictions, target, reconstructions, data)
+            predictions, reconstructions = capsule_net(data, target_onehot)
+            loss = capsule_loss(predictions, target_onehot, reconstructions, data)
             loss.backward()
             optimizer.step()
             if batch_idx % 10 == 0:
+                _, classes = F.softmax(predictions.norm(2, dim=2)).max(dim=1)
+                accuracy = sum(classes.data == target) / len(target)
+                writer.add_scalar('model/accuracy', accuracy)
                 writer.add_scalar('model/loss', loss.data[0], train_steps)
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.data[0]))
+                    100. * batch_idx / len(train_loader), loss.data[0], accuracy))
             train_steps = train_steps + 1
 
 if __name__ == '__main__':
