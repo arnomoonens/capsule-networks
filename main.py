@@ -32,7 +32,7 @@ class CapsuleLoss(nn.Module):
 
         reconstruction_loss = self.reconstruction_loss(reconstructions, images)
 
-        return margin_loss + 0.0005 * reconstruction_loss
+        return (margin_loss + 0.0005 * reconstruction_loss) / images.size(0)
 
 class CapsuleLayer(nn.Module):
     """Capsule layer of a Capsule net."""
