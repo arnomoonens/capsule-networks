@@ -175,6 +175,8 @@ def main():
                 accuracy = sum(classes.data.cpu() == target) / len(target)
                 writer.add_scalar('model/accuracy', accuracy, train_steps)
                 writer.add_scalar('model/loss', loss.data[0], train_steps)
+                writer.add_image('original', data[-1][0].data, train_steps)
+                writer.add_image('reconstruction', reconstructions[-1].view(28, 28).data, train_steps)
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.data[0], accuracy))
