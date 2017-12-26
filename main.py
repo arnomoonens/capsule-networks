@@ -172,8 +172,8 @@ def main():
             optimizer.step()
             if batch_idx % 10 == 0:
                 _, classes = F.softmax(predictions.norm(2, dim=2)).max(dim=1)
-                accuracy = sum(classes.data == target) / len(target)
-                writer.add_scalar('model/accuracy', accuracy)
+                accuracy = sum(classes.data.cpu() == target) / len(target)
+                writer.add_scalar('model/accuracy', accuracy, train_steps)
                 writer.add_scalar('model/loss', loss.data[0], train_steps)
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
