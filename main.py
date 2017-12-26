@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+import numpy as np
 
 import argparse
 
@@ -18,6 +19,24 @@ def batch_softmax(x):
     s = F.softmax(concatenated)
     return s.view(*x.size())
 
+def augmentation(x, max_shift=2):
+    """
+    Shift batch of images.
+    Source: https://github.com/gram-ai/capsule-networks/blob/d054428af39c1fafd57a980f80be194308e220e2/capsule_network.py#L25
+
+    """
+    _, _, height, width = x.size()
+
+    h_shift, w_shift = np.random.randint(-max_shift, max_shift + 1, size=2)
+    source_height_slice = slice(max(0, h_shift), h_shift + height)
+    source_width_slice = slice(max(0, w_shift), w_shift + width)
+    target_height_slice = slice(max(0, -h_shift), -h_shift + height)
+    target_width_slice = slice(max(0, -w_shift), -w_shift + width)
+
+    shifted_image = torch.zeros(*x.size())
+    shifted_image[:, :, source_height_slice, source_width_slice] = x[:, :, target_height_slice, target_width_slice]
+    return shifted_image.float()
+
 class CapsuleLoss(nn.Module):
     def __init__(self, gamma=0.5):
         super(CapsuleLoss, self).__init__()
@@ -29,7 +48,6 @@ class CapsuleLoss(nn.Module):
         left = labels * F.relu(m_plus - v_norm, inplace=True) ** 2
         right = self.gamma * (1 - labels) * F.relu(v_norm - m_min, inplace=True) ** 2
         margin_loss = torch.sum(left + right)  # Losses of a batch are summed
-
         reconstruction_loss = self.reconstruction_loss(reconstructions, images)
 
         return (margin_loss + 0.0005 * reconstruction_loss) / images.size(0)
@@ -134,7 +152,7 @@ class CapsuleNet(nn.Module):
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, default="./data", help="Path to directory with train/test data.")
 parser.add_argument("--batch_size", type=int, default=100, help="Batch size.")
-parser.add_argument("--num_epochs", type=int, default=500, help="Number of epochs to train.")
+parser.add_argument("--num_epochs", type=int, default=30, help="Number of epochs to train.")
 parser.add_argument("--gpu", dest="cuda", default=torch.cuda.is_available(), action="store_true", help="Run on GPU.")
 
 def main():
@@ -145,8 +163,7 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         datasets.MNIST(args.data, train=True,
                        transform=transforms.Compose([
-                           transforms.ToTensor(),
-                           transforms.Normalize((0.1307,), (0.3081,))
+                           transforms.ToTensor()
                        ])),
         batch_size=args.batch_size,
         shuffle=True
@@ -161,6 +178,7 @@ def main():
     train_steps = 0
     for epoch in range(args.num_epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
+            data = augmentation(data)
             target_onehot = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)
             if args.cuda:
                 data, target_onehot = data.cuda(), target_onehot.cuda()
