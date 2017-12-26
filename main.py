@@ -50,7 +50,7 @@ class CapsuleLayer(nn.Module):
             self.capsules = nn.ModuleList(
                 [nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride) for _ in range(num_capsules)]
             )
-        else:
+        else:  # Fully connected layer
             self.routing_weights = nn.Parameter(torch.randn(num_capsules, num_route_nodes, in_channels, out_channels))
 
     def forward(self, x, num_iterations=None):
@@ -84,7 +84,7 @@ class CapsuleLayer(nn.Module):
         return outputs
 
     def squash(v):
-        n = v.norm()
+        n = v.norm(2, dim=2, keepdim=True)
         n_squared = n ** 2
         scale = n_squared / (1 + n_squared)
         return scale * v / n
@@ -114,7 +114,7 @@ class CapsuleNet(nn.Module):
         x = self.primary_capsules(x)
         x = self.digit_capsules(x, num_iterations=3).squeeze().transpose(0, 1)
 
-        classes = x.norm()
+        classes = x.norm(2, dim=2)
         classes = F.softmax(classes)
 
         if labels is None:
@@ -132,6 +132,7 @@ class CapsuleNet(nn.Module):
         return x, reconstructed
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--data", type=str, default="./data", help="Path to directory with train/test data.")
 parser.add_argument("--batch_size", type=int, default=100, help="Batch size.")
 parser.add_argument("--num_epochs", type=int, default=500, help="Number of epochs to train.")
 parser.add_argument("--gpu", dest="cuda", default=torch.cuda.is_available(), action="store_true", help="Run on GPU.")
@@ -142,7 +143,7 @@ def main():
     writer = SummaryWriter()
     args = parser.parse_args()
     train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('./data', train=True,
+        datasets.MNIST(args.data, train=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))
@@ -151,7 +152,7 @@ def main():
         shuffle=True
     )
 
-    capsule_net = CapsuleNet(num_classes=NUM_CLASSES)
+    capsule_net = CapsuleNet(num_classes=NUM_CLASSES, use_cuda=args.cuda)
     if args.cuda:
         capsule_net = capsule_net.cuda()
     capsule_loss = CapsuleLoss()
