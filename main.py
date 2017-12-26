@@ -9,8 +9,6 @@ import numpy as np
 
 import argparse
 
-NUM_CLASSES = 10  # TODO: derive this from labels
-
 m_plus = 0.9
 m_min = 1.0 - m_plus
 
@@ -109,8 +107,11 @@ class CapsuleLayer(nn.Module):
 
 class CapsuleNet(nn.Module):
     """Capsule Net."""
-    def __init__(self, num_classes, reconstr_hidden1=512, reconstr_hidden2=1024, use_cuda=False):
+    def __init__(self, num_classes, height, width, reconstr_hidden1=512, reconstr_hidden2=1024, use_cuda=False):
         super(CapsuleNet, self).__init__()
+        self.num_classes = num_classes
+        self.height = height
+        self.width = width
         self.use_cuda = use_cuda
 
         self.conv = nn.Conv2d(in_channels=1, out_channels=256, kernel_size=9, stride=1)
@@ -119,11 +120,11 @@ class CapsuleNet(nn.Module):
         self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * 6 * 6, in_channels=8, out_channels=16, use_cuda=use_cuda)
 
         self.reconstruction = nn.Sequential(
-            nn.Linear(NUM_CLASSES * self.digit_capsules.out_channels, reconstr_hidden1),
+            nn.Linear(num_classes * self.digit_capsules.out_channels, reconstr_hidden1),
             nn.ReLU(inplace=True),
             nn.Linear(reconstr_hidden1, reconstr_hidden2),
             nn.ReLU(inplace=True),
-            nn.Linear(reconstr_hidden2, 28 * 28),  # TODO: use actual dimensions of input instead of hard-coded
+            nn.Linear(reconstr_hidden2, height * width),
             nn.Sigmoid()
         )
 
@@ -138,7 +139,7 @@ class CapsuleNet(nn.Module):
         if labels is None:
             # In all batches, get the most active capsule.
             _, max_length_indices = classes.max(dim=1)
-            mask = Variable(torch.sparse.torch.eye(NUM_CLASSES))
+            mask = Variable(torch.sparse.torch.eye(self.num_classes))
             if self.use_cuda:
                 mask = mask.cuda()
             mask = mask.index_select(dim=0, index=max_length_indices.data)
@@ -147,7 +148,7 @@ class CapsuleNet(nn.Module):
         masked = mask[:, :, None] * x  # That None gives you an extra dimension, necessary for multiplication
         reconstructed = self.reconstruction(masked.contiguous().view(masked.size(0), -1))
 
-        return x, reconstructed
+        return x, masked, reconstructed
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, default="./data", help="Path to directory with train/test data.")
@@ -160,16 +161,21 @@ def main():
     from tensorboardX import SummaryWriter
     writer = SummaryWriter()
     args = parser.parse_args()
+    data = datasets.MNIST(
+        args.data,
+        train=True,
+        transform=transforms.Compose([
+            transforms.ToTensor()
+        ]))
+    _, height, width = data.train_data.size()
+    num_classes = len(set(data.train_labels))
     train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST(args.data, train=True,
-                       transform=transforms.Compose([
-                           transforms.ToTensor()
-                       ])),
+        data,
         batch_size=args.batch_size,
         shuffle=True
     )
 
-    capsule_net = CapsuleNet(num_classes=NUM_CLASSES, use_cuda=args.cuda)
+    capsule_net = CapsuleNet(num_classes, height, width, use_cuda=args.cuda)
     if args.cuda:
         capsule_net = capsule_net.cuda()
     capsule_loss = CapsuleLoss()
@@ -179,12 +185,12 @@ def main():
     for epoch in range(args.num_epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             data = augmentation(data)
-            target_onehot = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)
+            target_onehot = torch.sparse.torch.eye(num_classes).index_select(dim=0, index=target)
             if args.cuda:
                 data, target_onehot = data.cuda(), target_onehot.cuda()
             data, target_onehot = Variable(data), Variable(target_onehot)
             capsule_net.zero_grad()
-            predictions, reconstructions = capsule_net(data, target_onehot)
+            predictions, masked, reconstructions = capsule_net(data, target_onehot)
             loss = capsule_loss(predictions, target_onehot, reconstructions, data)
             loss.backward()
             optimizer.step()
@@ -193,12 +199,15 @@ def main():
                 accuracy = sum(classes.data.cpu() == target) / len(target)
                 writer.add_scalar('model/accuracy', accuracy, train_steps)
                 writer.add_scalar('model/loss', loss.data[0], train_steps)
-                writer.add_image('original', data[-1][0].data, train_steps)
-                writer.add_image('reconstruction', reconstructions[-1].view(28, 28).data, train_steps)
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.data[0], accuracy))
+            if batch_idx % 100 == 0:
+                writer.add_image('original', data[-1][0].data, train_steps)
+                writer.add_image('reconstruction', reconstructions[-1].view(height, width).data, train_steps)
+                writer.add_text('vectors', str(list(masked[-1].view(-1).data)), train_steps)
             train_steps = train_steps + 1
+        torch.save(capsule_net.state_dict(), 'epochs/epoch_%d.pt' % epoch)
 
 if __name__ == '__main__':
     main()
