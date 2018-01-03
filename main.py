@@ -12,6 +12,19 @@ import argparse
 m_plus = 0.9
 m_min = 1.0 - m_plus
 
+
+def conv2d_output_size(height, width, conv):
+    """
+    Calculate the height and with of the output of a 2-dimensional convolution,
+    given the height and with of the input.
+
+    Source for the formula: http://pytorch.org/docs/master/nn.html#conv2d
+    """
+
+    output_height = np.floor((height + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) / conv.stride[0] + 1)
+    output_width = np.floor((width + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) / conv.stride[0] + 1)
+    return int(output_height), int(output_width)
+
 def batch_softmax(x):
     concatenated = torch.cat(x)
     s = F.softmax(concatenated)
@@ -115,9 +128,12 @@ class CapsuleNet(nn.Module):
         self.use_cuda = use_cuda
 
         self.conv = nn.Conv2d(in_channels=1, out_channels=256, kernel_size=9, stride=1)
+        conv_size = conv2d_output_size(height, width, self.conv)
         self.non_linearity = nn.ReLU(inplace=True)
         self.primary_capsules = CapsuleLayer(num_capsules=8, num_route_nodes=-1, in_channels=256, out_channels=32, kernel_size=9, stride=2, use_cuda=use_cuda)
-        self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * 6 * 6, in_channels=8, out_channels=16, use_cuda=use_cuda)
+        # conv = self.primary_capsules.capsules[0]
+        pc_h, pc_w = conv2d_output_size(*conv_size, self.primary_capsules.capsules[0])
+        self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * pc_h * pc_w, in_channels=8, out_channels=16, use_cuda=use_cuda)
 
         self.reconstruction = nn.Sequential(
             nn.Linear(num_classes * self.digit_capsules.out_channels, reconstr_hidden1),
@@ -167,7 +183,7 @@ def main():
         transform=transforms.Compose([
             transforms.ToTensor()
         ]))
-    _, height, width = data.train_data.size()
+    _, height, width = data[0][0].size()
     num_classes = len(set(data.train_labels))
     train_loader = torch.utils.data.DataLoader(
         data,
