@@ -16,13 +16,13 @@ m_min = 1.0 - m_plus
 def conv2d_output_size(height, width, conv):
     """
     Calculate the height and with of the output of a 2-dimensional convolution,
-    given the height and with of the input.
+    given the height and width of the input.
 
     Source for the formula: http://pytorch.org/docs/master/nn.html#conv2d
     """
 
     output_height = np.floor((height + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) / conv.stride[0] + 1)
-    output_width = np.floor((width + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) / conv.stride[0] + 1)
+    output_width = np.floor((width + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) / conv.stride[1] + 1)
     return int(output_height), int(output_width)
 
 def batch_softmax(x):
