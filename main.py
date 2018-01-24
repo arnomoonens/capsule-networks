@@ -131,7 +131,6 @@ class CapsuleNet(nn.Module):
         conv_size = conv2d_output_size(height, width, self.conv)
         self.non_linearity = nn.ReLU(inplace=True)
         self.primary_capsules = CapsuleLayer(num_capsules=8, num_route_nodes=-1, in_channels=256, out_channels=32, kernel_size=9, stride=2, use_cuda=use_cuda)
-        # conv = self.primary_capsules.capsules[0]
         pc_h, pc_w = conv2d_output_size(*conv_size, self.primary_capsules.capsules[0])
         self.digit_capsules = CapsuleLayer(num_capsules=num_classes, num_route_nodes=32 * pc_h * pc_w, in_channels=8, out_channels=16, use_cuda=use_cuda)
 
@@ -170,6 +169,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, default="./data", help="Path to directory with train/test data.")
 parser.add_argument("--batch_size", type=int, default=100, help="Batch size.")
 parser.add_argument("--num_epochs", type=int, default=30, help="Number of epochs to train.")
+parser.add_argument("--img_padding", type=int, default=0, help="Padding on each side of the train images.")
 parser.add_argument("--gpu", dest="cuda", default=torch.cuda.is_available(), action="store_true", help="Run on GPU.")
 
 def main():
@@ -181,6 +181,7 @@ def main():
         args.data,
         train=True,
         transform=transforms.Compose([
+            transforms.Pad(args.img_padding),
             transforms.ToTensor()
         ]))
     _, height, width = data[0][0].size()
